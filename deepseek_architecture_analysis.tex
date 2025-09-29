@@ -1,0 +1,557 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\usepackage{tikz}
+\usepackage{tikz-uml}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{float}
+
+\geometry{left=2cm,right=2cm,top=2cm,bottom=2cm}
+
+\title{Analyse et Amélioration de l'Architecture Gateway de DeepSeek:\\
+De l'Architecture Monolithique vers les Microservices Parallèles}
+\author{Analyse Architecturale UML}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+Cette analyse présente l'architecture Gateway de DeepSeek, une plateforme d'intelligence artificielle qui fournit des services de Large Language Models (LLM) via une API compatible OpenAI. L'objectif est d'analyser l'architecture actuelle, d'identifier ses limitations, et de proposer une architecture améliorée basée sur des microservices parallèles.
+
+DeepSeek utilise notamment un service de fallback pour assurer la haute disponibilité et la résilience de ses services, ce qui constitue un élément crucial de son architecture de production.
+
+\section{Analyse de l'Architecture Actuelle de DeepSeek}
+
+\subsection{Vue d'ensemble de l'Architecture Gateway}
+
+L'architecture actuelle de DeepSeek suit un modèle de gateway centralisé qui gère toutes les requêtes API et les distribue vers les services appropriés. Cette architecture présente les caractéristiques suivantes :
+
+\begin{itemize}
+    \item \textbf{Gateway API centralisé} : Point d'entrée unique pour toutes les requêtes
+    \item \textbf{Authentification et autorisation} : Gestion centralisée des clés API
+    \item \textbf{Load Balancing} : Distribution des charges vers les instances de modèles
+    \item \textbf{Service de Fallback} : Mécanisme de basculement en cas de défaillance
+    \item \textbf{Cache et optimisation} : Mise en cache des réponses fréquentes
+\end{itemize}
+
+\subsection{Diagramme de Composants - Architecture Actuelle}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+    % Client
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=1cm] (client) at (0,8) {Client\\Applications};
+    
+    % Load Balancer
+    \node[rectangle, draw, fill=green!20, minimum width=2.5cm, minimum height=1cm] (lb) at (0,6) {Load Balancer\\(Nginx/HAProxy)};
+    
+    % API Gateway
+    \node[rectangle, draw, fill=yellow!20, minimum width=3cm, minimum height=1.5cm] (gateway) at (0,4) {API Gateway\\- Authentication\\- Rate Limiting\\- Routing};
+    
+    % Core Services
+    \node[rectangle, draw, fill=orange!20, minimum width=2.5cm, minimum height=1cm] (auth) at (-4,2) {Authentication\\Service};
+    \node[rectangle, draw, fill=orange!20, minimum width=2.5cm, minimum height=1cm] (chat) at (0,2) {Chat Completion\\Service};
+    \node[rectangle, draw, fill=orange!20, minimum width=2.5cm, minimum height=1cm] (fallback) at (4,2) {Fallback\\Service};
+    
+    % Model Instances
+    \node[rectangle, draw, fill=red!20, minimum width=2cm, minimum height=0.8cm] (model1) at (-2,0) {DeepSeek-V3.2\\Instance 1};
+    \node[rectangle, draw, fill=red!20, minimum width=2cm, minimum height=0.8cm] (model2) at (0,0) {DeepSeek-V3.2\\Instance 2};
+    \node[rectangle, draw, fill=red!20, minimum width=2cm, minimum height=0.8cm] (model3) at (2,0) {DeepSeek-V3.2\\Instance 3};
+    
+    % Database
+    \node[rectangle, draw, fill=purple!20, minimum width=2cm, minimum height=1cm] (db) at (-6,0) {Database\\(Redis/MongoDB)};
+    
+    % Connections
+    \draw[->] (client) -- (lb);
+    \draw[->] (lb) -- (gateway);
+    \draw[->] (gateway) -- (auth);
+    \draw[->] (gateway) -- (chat);
+    \draw[->] (gateway) -- (fallback);
+    \draw[->] (chat) -- (model1);
+    \draw[->] (chat) -- (model2);
+    \draw[->] (chat) -- (model3);
+    \draw[->] (fallback) -- (model1);
+    \draw[->] (fallback) -- (model2);
+    \draw[->] (fallback) -- (model3);
+    \draw[->] (auth) -- (db);
+    
+    % Fallback connection
+    \draw[->, dashed, red] (chat) to[bend right=30] (fallback);
+    
+\end{tikzpicture}
+\caption{Architecture Actuelle de DeepSeek Gateway}
+\label{fig:current_arch}
+\end{figure}
+
+\subsection{Analyse des Forces et Faiblesses}
+
+\subsubsection{Forces de l'Architecture Actuelle}
+
+\begin{enumerate}
+    \item \textbf{Simplicité de déploiement} : Architecture centralisée facile à comprendre et déployer
+    \item \textbf{Contrôle centralisé} : Gestion uniforme de l'authentification et des politiques
+    \item \textbf{Compatibilité OpenAI} : Interface standardisée facilitant l'adoption
+    \item \textbf{Service de Fallback} : Mécanisme de résilience en cas de défaillance des instances principales
+    \item \textbf{Load Balancing efficace} : Distribution équitable des charges
+\end{enumerate}
+
+\subsubsection{Limitations Identifiées}
+
+\begin{enumerate}
+    \item \textbf{Point de défaillance unique} : Le gateway peut devenir un goulot d'étranglement
+    \item \textbf{Scalabilité limitée} : Difficile de scale horizontalement certains composants
+    \item \textbf{Couplage fort} : Dépendances étroites entre les composants
+    \item \textbf{Latence} : Traitement séquentiel des requêtes dans le gateway
+    \item \textbf{Maintenance complexe} : Déploiements monolithiques affectant tout le système
+\end{enumerate}
+
+\section{Architecture Améliorée Proposée}
+
+\subsection{Principes de Conception}
+
+L'architecture améliorée suit les principes suivants :
+
+\begin{itemize}
+    \item \textbf{Découplage} : Séparation claire des responsabilités
+    \item \textbf{Scalabilité horizontale} : Capacité à scale indépendamment chaque service
+    \item \textbf{Résilience} : Tolérance aux pannes et récupération automatique
+    \item \textbf{Performance} : Traitement parallèle et optimisation des latences
+    \item \textbf{Observabilité} : Monitoring et traçabilité complète
+\end{itemize}
+
+\subsection{Diagramme de Composants - Architecture Améliorée}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.7]
+    % External Clients
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=0.8cm] (web) at (-4,10) {Web Clients};
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=0.8cm] (mobile) at (0,10) {Mobile Apps};
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=0.8cm] (api) at (4,10) {API Clients};
+    
+    % API Gateway Cluster
+    \node[rectangle, draw, fill=green!30, minimum width=8cm, minimum height=1.2cm] (gateway_cluster) at (0,8.5) {API Gateway Cluster (Kong/Istio)};
+    
+    % Service Mesh
+    \node[rectangle, draw, fill=yellow!20, minimum width=8cm, minimum height=0.8cm] (mesh) at (0,7) {Service Mesh (Istio/Linkerd)};
+    
+    % Microservices Layer
+    \node[rectangle, draw, fill=orange!20, minimum width=1.5cm, minimum height=1cm] (auth_ms) at (-6,5) {Auth\\Microservice};
+    \node[rectangle, draw, fill=orange!20, minimum width=1.5cm, minimum height=1cm] (chat_ms) at (-3,5) {Chat\\Microservice};
+    \node[rectangle, draw, fill=orange!20, minimum width=1.5cm, minimum height=1cm] (model_ms) at (0,5) {Model\\Orchestrator};
+    \node[rectangle, draw, fill=orange!20, minimum width=1.5cm, minimum height=1cm] (fallback_ms) at (3,5) {Fallback\\Microservice};
+    \node[rectangle, draw, fill=orange!20, minimum width=1.5cm, minimum height=1cm] (metrics_ms) at (6,5) {Metrics\\Microservice};
+    
+    % Processing Layer
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm] (proc1) at (-4,3) {Processing\\Node 1};
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm] (proc2) at (-2,3) {Processing\\Node 2};
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm] (proc3) at (0,3) {Processing\\Node 3};
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm] (proc4) at (2,3) {Processing\\Node 4};
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm] (proc5) at (4,3) {Processing\\Node 5};
+    
+    % Model Instances
+    \node[rectangle, draw, fill=purple!20, minimum width=1cm, minimum height=0.6cm] (m1) at (-3,1) {Model\\A1};
+    \node[rectangle, draw, fill=purple!20, minimum width=1cm, minimum height=0.6cm] (m2) at (-1,1) {Model\\A2};
+    \node[rectangle, draw, fill=purple!20, minimum width=1cm, minimum height=0.6cm] (m3) at (1,1) {Model\\B1};
+    \node[rectangle, draw, fill=purple!20, minimum width=1cm, minimum height=0.6cm] (m4) at (3,1) {Model\\B2};
+    
+    % Data Layer
+    \node[rectangle, draw, fill=gray!20, minimum width=1.5cm, minimum height=0.8cm] (redis) at (-5,-0.5) {Redis\\Cluster};
+    \node[rectangle, draw, fill=gray!20, minimum width=1.5cm, minimum height=0.8cm] (mongo) at (-2,-0.5) {MongoDB\\Cluster};
+    \node[rectangle, draw, fill=gray!20, minimum width=1.5cm, minimum height=0.8cm] (elastic) at (2,-0.5) {Elasticsearch};
+    \node[rectangle, draw, fill=gray!20, minimum width=1.5cm, minimum height=0.8cm] (kafka) at (5,-0.5) {Apache\\Kafka};
+    
+    % Connections
+    \draw[->] (web) -- (gateway_cluster);
+    \draw[->] (mobile) -- (gateway_cluster);
+    \draw[->] (api) -- (gateway_cluster);
+    \draw[->] (gateway_cluster) -- (mesh);
+    
+    % Service mesh to microservices
+    \draw[->] (mesh) -- (auth_ms);
+    \draw[->] (mesh) -- (chat_ms);
+    \draw[->] (mesh) -- (model_ms);
+    \draw[->] (mesh) -- (fallback_ms);
+    \draw[->] (mesh) -- (metrics_ms);
+    
+    % Microservices to processing nodes
+    \draw[->] (model_ms) -- (proc1);
+    \draw[->] (model_ms) -- (proc2);
+    \draw[->] (model_ms) -- (proc3);
+    \draw[->] (model_ms) -- (proc4);
+    \draw[->] (model_ms) -- (proc5);
+    
+    % Processing nodes to models
+    \draw[->] (proc1) -- (m1);
+    \draw[->] (proc2) -- (m2);
+    \draw[->] (proc3) -- (m3);
+    \draw[->] (proc4) -- (m4);
+    
+    % Fallback connections
+    \draw[->, dashed, red] (fallback_ms) -- (proc1);
+    \draw[->, dashed, red] (fallback_ms) -- (proc2);
+    \draw[->, dashed, red] (fallback_ms) -- (proc3);
+    
+    % Data connections
+    \draw[->] (auth_ms) -- (redis);
+    \draw[->] (chat_ms) -- (mongo);
+    \draw[->] (metrics_ms) -- (elastic);
+    \draw[->] (fallback_ms) -- (kafka);
+    
+\end{tikzpicture}
+\caption{Architecture Améliorée avec Microservices}
+\label{fig:improved_arch}
+\end{figure}
+
+\subsection{Description des Composants Améliorés}
+
+\subsubsection{API Gateway Cluster}
+\begin{itemize}
+    \item Cluster de gateways pour éliminer le point de défaillance unique
+    \item Load balancing intelligent avec health checks
+    \item Cache distribué pour les réponses fréquentes
+    \item Rate limiting avancé par utilisateur et par endpoint
+\end{itemize}
+
+\subsubsection{Service Mesh}
+\begin{itemize}
+    \item Gestion automatique de la communication inter-services
+    \item Chiffrement TLS mutuel automatique
+    \item Circuit breaker et retry automatiques
+    \item Observabilité complète des communications
+\end{itemize}
+
+\subsubsection{Microservices Spécialisés}
+\begin{itemize}
+    \item \textbf{Auth Microservice} : Authentification et autorisation distribuée
+    \item \textbf{Chat Microservice} : Gestion des conversations et contexte
+    \item \textbf{Model Orchestrator} : Orchestration intelligente des modèles
+    \item \textbf{Fallback Microservice} : Service de basculement amélioré avec prédiction
+    \item \textbf{Metrics Microservice} : Collecte et analyse des métriques en temps réel
+\end{itemize}
+
+\section{Architecture Microservices Parallèles}
+
+\subsection{Modèle de Traitement Parallèle}
+
+L'architecture microservices parallèles permet le traitement simultané des requêtes à travers plusieurs dimensions :
+
+\begin{enumerate}
+    \item \textbf{Parallélisme horizontal} : Multiple instances de chaque microservice
+    \item \textbf{Parallélisme vertical} : Pipeline de traitement avec stages parallèles
+    \item \textbf{Parallélisme de modèles} : Exécution simultanée sur différents modèles
+    \item \textbf{Parallélisme géographique} : Déploiement multi-région
+\end{enumerate}
+
+\subsection{Diagramme de Séquence - Traitement Parallèle}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+    % Actors
+    \node (client) at (0,10) {Client};
+    \node (gateway) at (2,10) {Gateway};
+    \node (auth) at (4,10) {Auth Service};
+    \node (orchestrator) at (6,10) {Orchestrator};
+    \node (proc1) at (8,10) {Processor 1};
+    \node (proc2) at (10,10) {Processor 2};
+    \node (fallback) at (12,10) {Fallback};
+    
+    % Lifelines
+    \draw[dashed] (client) -- (0,0);
+    \draw[dashed] (gateway) -- (2,0);
+    \draw[dashed] (auth) -- (4,0);
+    \draw[dashed] (orchestrator) -- (6,0);
+    \draw[dashed] (proc1) -- (8,0);
+    \draw[dashed] (proc2) -- (10,0);
+    \draw[dashed] (fallback) -- (12,0);
+    
+    % Messages
+    \draw[->] (0,9) -- (2,9) node[midway,above] {Request};
+    \draw[->] (2,8.5) -- (4,8.5) node[midway,above] {Auth};
+    \draw[->] (4,8) -- (2,8) node[midway,above] {Token};
+    \draw[->] (2,7.5) -- (6,7.5) node[midway,above] {Process};
+    
+    % Parallel processing
+    \draw[->] (6,7) -- (8,7) node[midway,above] {Task A};
+    \draw[->] (6,6.5) -- (10,6.5) node[midway,above] {Task B};
+    
+    % Processing
+    \draw[->] (8,6) -- (8,5.5) node[midway,right] {Execute};
+    \draw[->] (10,5.8) -- (10,5.3) node[midway,right] {Execute};
+    
+    % Results
+    \draw[->] (8,5) -- (6,5) node[midway,above] {Result A};
+    \draw[->] (10,4.5) -- (6,4.5) node[midway,above] {Result B};
+    
+    % Aggregation
+    \draw[->] (6,4) -- (6,3.5) node[midway,right] {Aggregate};
+    
+    % Fallback scenario (dashed)
+    \draw[->, dashed, red] (6,3) -- (12,3) node[midway,above] {Fallback};
+    \draw[->, dashed, red] (12,2.5) -- (6,2.5) node[midway,above] {Backup Result};
+    
+    % Final response
+    \draw[->] (6,2) -- (2,2) node[midway,above] {Response};
+    \draw[->] (2,1.5) -- (0,1.5) node[midway,above] {Final Result};
+    
+\end{tikzpicture}
+\caption{Diagramme de Séquence - Traitement Parallèle avec Fallback}
+\label{fig:sequence_parallel}
+\end{figure}
+
+\subsection{Patterns d'Architecture Microservices}
+
+\subsubsection{Pattern Circuit Breaker}
+Le service de fallback utilise le pattern Circuit Breaker pour :
+\begin{itemize}
+    \item Détecter automatiquement les défaillances
+    \item Basculer vers des services alternatifs
+    \item Permettre la récupération automatique
+    \item Éviter la propagation des pannes
+\end{itemize}
+
+\subsubsection{Pattern Event Sourcing}
+\begin{itemize}
+    \item Traçabilité complète des événements
+    \item Possibilité de replay des opérations
+    \item Audit et debugging facilités
+    \item Scalabilité des lectures
+\end{itemize}
+
+\subsubsection{Pattern CQRS (Command Query Responsibility Segregation)}
+\begin{itemize}
+    \item Séparation des opérations de lecture et d'écriture
+    \item Optimisation spécifique pour chaque type d'opération
+    \item Scalabilité indépendante
+    \item Performance améliorée
+\end{itemize}
+
+\section{Diagramme de Déploiement}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.7]
+    % Kubernetes Cluster
+    \node[rectangle, draw, fill=blue!10, minimum width=14cm, minimum height=10cm] (k8s) at (0,0) {};
+    \node at (-6,4.5) {\textbf{Kubernetes Cluster}};
+    
+    % Namespaces
+    \node[rectangle, draw, fill=green!10, minimum width=4cm, minimum height=2cm] (ns_gateway) at (-4,2) {};
+    \node at (-4,2.8) {\textbf{Gateway Namespace}};
+    
+    \node[rectangle, draw, fill=yellow!10, minimum width=4cm, minimum height=2cm] (ns_services) at (0,2) {};
+    \node at (0,2.8) {\textbf{Services Namespace}};
+    
+    \node[rectangle, draw, fill=orange!10, minimum width=4cm, minimum height=2cm] (ns_models) at (4,2) {};
+    \node at (4,2.8) {\textbf{Models Namespace}};
+    
+    \node[rectangle, draw, fill=purple!10, minimum width=12cm, minimum height=1.5cm] (ns_data) at (0,-2) {};
+    \node at (0,-1.3) {\textbf{Data Namespace}};
+    
+    % Pods in Gateway Namespace
+    \node[circle, draw, fill=green!30, minimum size=0.5cm] (gw1) at (-5,1.5) {GW1};
+    \node[circle, draw, fill=green!30, minimum size=0.5cm] (gw2) at (-3,1.5) {GW2};
+    
+    % Pods in Services Namespace
+    \node[circle, draw, fill=yellow!30, minimum size=0.5cm] (auth) at (-1.5,1.5) {Auth};
+    \node[circle, draw, fill=yellow!30, minimum size=0.5cm] (chat) at (-0.5,1.5) {Chat};
+    \node[circle, draw, fill=yellow!30, minimum size=0.5cm] (orch) at (0.5,1.5) {Orch};
+    \node[circle, draw, fill=yellow!30, minimum size=0.5cm] (fall) at (1.5,1.5) {Fall};
+    
+    % Pods in Models Namespace
+    \node[circle, draw, fill=orange!30, minimum size=0.5cm] (m1) at (3,1.5) {M1};
+    \node[circle, draw, fill=orange!30, minimum size=0.5cm] (m2) at (4,1.5) {M2};
+    \node[circle, draw, fill=orange!30, minimum size=0.5cm] (m3) at (5,1.5) {M3};
+    
+    % Data Layer
+    \node[cylinder, draw, fill=purple!30, minimum width=1cm, minimum height=0.8cm] (redis) at (-3,-2) {Redis};
+    \node[cylinder, draw, fill=purple!30, minimum width=1cm, minimum height=0.8cm] (mongo) at (-1,-2) {Mongo};
+    \node[cylinder, draw, fill=purple!30, minimum width=1cm, minimum height=0.8cm] (kafka) at (1,-2) {Kafka};
+    \node[cylinder, draw, fill=purple!30, minimum width=1cm, minimum height=0.8cm] (elastic) at (3,-2) {Elastic};
+    
+    % External Load Balancer
+    \node[rectangle, draw, fill=red!20, minimum width=3cm, minimum height=0.8cm] (elb) at (0,4.5) {External Load Balancer};
+    
+    % Connections
+    \draw[->] (elb) -- (gw1);
+    \draw[->] (elb) -- (gw2);
+    
+\end{tikzpicture}
+\caption{Diagramme de Déploiement Kubernetes}
+\label{fig:deployment}
+\end{figure}
+
+\section{Métriques et Monitoring}
+
+\subsection{Indicateurs Clés de Performance (KPI)}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Métrique} & \textbf{Cible} & \textbf{Outils} \\
+\hline
+Latence P95 & < 200ms & Prometheus \\
+Throughput & > 10k req/s & Grafana \\
+Disponibilité & 99.9\% & Jaeger \\
+Taux d'erreur & < 0.1\% & ELK Stack \\
+Utilisation CPU & < 70\% & Kubernetes Metrics \\
+Utilisation Mémoire & < 80\% & cAdvisor \\
+\hline
+\end{tabular}
+\caption{Métriques de Performance}
+\label{tab:metrics}
+\end{table}
+
+\subsection{Diagramme de Monitoring}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+    % Applications
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=1cm] (app1) at (-4,4) {Microservice 1};
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=1cm] (app2) at (-2,4) {Microservice 2};
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=1cm] (app3) at (0,4) {Microservice 3};
+    \node[rectangle, draw, fill=blue!20, minimum width=2cm, minimum height=1cm] (fallback) at (2,4) {Fallback Service};
+    
+    % Monitoring Stack
+    \node[rectangle, draw, fill=green!20, minimum width=2cm, minimum height=1cm] (prometheus) at (-2,2) {Prometheus};
+    \node[rectangle, draw, fill=yellow!20, minimum width=2cm, minimum height=1cm] (grafana) at (0,2) {Grafana};
+    \node[rectangle, draw, fill=orange!20, minimum width=2cm, minimum height=1cm] (jaeger) at (2,2) {Jaeger};
+    
+    % Logging
+    \node[rectangle, draw, fill=purple!20, minimum width=2cm, minimum height=1cm] (elasticsearch) at (-2,0) {Elasticsearch};
+    \node[rectangle, draw, fill=purple!20, minimum width=2cm, minimum height=1cm] (kibana) at (0,0) {Kibana};
+    \node[rectangle, draw, fill=purple!20, minimum width=2cm, minimum height=1cm] (logstash) at (2,0) {Logstash};
+    
+    % Alerting
+    \node[rectangle, draw, fill=red!20, minimum width=3cm, minimum height=1cm] (alertmanager) at (4,2) {Alert Manager};
+    
+    % Connections
+    \draw[->] (app1) -- (prometheus);
+    \draw[->] (app2) -- (prometheus);
+    \draw[->] (app3) -- (prometheus);
+    \draw[->] (fallback) -- (prometheus);
+    
+    \draw[->] (app1) -- (jaeger);
+    \draw[->] (app2) -- (jaeger);
+    \draw[->] (app3) -- (jaeger);
+    \draw[->] (fallback) -- (jaeger);
+    
+    \draw[->] (prometheus) -- (grafana);
+    \draw[->] (prometheus) -- (alertmanager);
+    
+    \draw[->] (app1) to[bend right] (logstash);
+    \draw[->] (app2) to[bend right] (logstash);
+    \draw[->] (app3) to[bend right] (logstash);
+    \draw[->] (fallback) to[bend right] (logstash);
+    
+    \draw[->] (logstash) -- (elasticsearch);
+    \draw[->] (elasticsearch) -- (kibana);
+    
+\end{tikzpicture}
+\caption{Architecture de Monitoring et Observabilité}
+\label{fig:monitoring}
+\end{figure}
+
+\section{Avantages de l'Architecture Améliorée}
+
+\subsection{Scalabilité}
+\begin{itemize}
+    \item \textbf{Scale horizontal} : Chaque microservice peut être scalé indépendamment
+    \item \textbf{Auto-scaling} : Adaptation automatique à la charge
+    \item \textbf{Multi-région} : Déploiement géographiquement distribué
+\end{itemize}
+
+\subsection{Résilience}
+\begin{itemize}
+    \item \textbf{Isolation des pannes} : Une défaillance n'affecte pas tout le système
+    \item \textbf{Circuit breaker} : Protection automatique contre les cascades de pannes
+    \item \textbf{Fallback amélioré} : Service de basculement prédictif et intelligent
+    \item \textbf{Health checks} : Surveillance continue de la santé des services
+\end{itemize}
+
+\subsection{Performance}
+\begin{itemize}
+    \item \textbf{Traitement parallèle} : Exécution simultanée des tâches
+    \item \textbf{Cache distribué} : Réduction de la latence
+    \item \textbf{Load balancing intelligent} : Distribution optimale des charges
+    \item \textbf{Connection pooling} : Réutilisation efficace des connexions
+\end{itemize}
+
+\subsection{Maintenance}
+\begin{itemize}
+    \item \textbf{Déploiements indépendants} : Mise à jour sans interruption de service
+    \item \textbf{Blue-Green deployment} : Déploiement sans risque
+    \item \textbf{Rollback rapide} : Retour en arrière immédiat en cas de problème
+    \item \textbf{Observabilité complète} : Debugging et monitoring facilités
+\end{itemize}
+
+\section{Stratégie de Migration}
+
+\subsection{Phase 1 : Préparation}
+\begin{enumerate}
+    \item Analyse de l'existant et identification des dépendances
+    \item Mise en place de l'infrastructure Kubernetes
+    \item Déploiement des outils de monitoring
+    \item Formation des équipes
+\end{enumerate}
+
+\subsection{Phase 2 : Migration Progressive}
+\begin{enumerate}
+    \item Extraction du service d'authentification
+    \item Migration du service de fallback
+    \item Décomposition du service principal en microservices
+    \item Mise en place du service mesh
+\end{enumerate}
+
+\subsection{Phase 3 : Optimisation}
+\begin{enumerate}
+    \item Tuning des performances
+    \item Optimisation du cache distribué
+    \item Mise en place de l'auto-scaling
+    \item Tests de charge et validation
+\end{enumerate}
+
+\section{Conclusion}
+
+L'architecture microservices parallèles proposée pour DeepSeek offre des avantages significatifs par rapport à l'architecture gateway centralisée actuelle :
+
+\begin{itemize}
+    \item \textbf{Élimination du point de défaillance unique} grâce au cluster de gateways
+    \item \textbf{Amélioration de la scalabilité} avec des microservices indépendants
+    \item \textbf{Renforcement de la résilience} avec le service de fallback amélioré
+    \item \textbf{Augmentation des performances} par le traitement parallèle
+    \item \textbf{Facilitation de la maintenance} avec des déploiements indépendants
+\end{itemize}
+
+Le service de fallback, élément crucial de l'architecture DeepSeek, est considérablement amélioré dans cette proposition avec des capacités prédictives et une intégration native au service mesh.
+
+Cette architecture permet à DeepSeek de maintenir sa position concurrentielle tout en préparant l'infrastructure pour une croissance future et l'intégration de nouvelles fonctionnalités d'IA.
+
+\section{Références}
+
+\begin{itemize}
+    \item DeepSeek-AI/DeepSeek-Coder Repository: \url{https://github.com/deepseek-ai/DeepSeek-Coder}
+    \item DeepSeek API Documentation: \url{https://api-docs.deepseek.com/}
+    \item Kubernetes Documentation: \url{https://kubernetes.io/docs/}
+    \item Istio Service Mesh: \url{https://istio.io/}
+    \item Microservices Patterns by Chris Richardson
+    \item Building Microservices by Sam Newman
+\end{itemize}
+
+\end{document}
